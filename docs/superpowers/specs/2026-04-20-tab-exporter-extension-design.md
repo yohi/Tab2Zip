@@ -4,44 +4,51 @@
 A Chrome Manifest V3 extension that extracts URLs and Titles from tabs and allows downloading them in TXT, Markdown (MD), or PDF formats via the context menu.
 
 ## 2. Architecture & Approach
-**Approach A (Service Worker Only)**: 
-The extension will run entirely within the `background.ts` Service Worker. It will use `chrome.contextMenus` to trigger actions, query the `chrome.tabs` API for data, and format it. PDF generation will be handled by bundling `jspdf` into the Service Worker using `esbuild`. The resulting files will be downloaded via the `chrome.downloads` API using Data URIs.
+**Approach A+ (Service Worker Driven with Offscreen Support)**: 
+The extension is primarily driven by the `background.ts` Service Worker. It uses `chrome.contextMenus` to trigger actions and `chrome.tabs` to query data.
+*   **Small Exports (< 2MB)**: Handled directly in the Service Worker via Data URIs.
+*   **Large Exports (>= 2MB)**: To bypass the Data URI size limit, the extension launches a minimal Offscreen Document to create a Blob URL via `URL.createObjectURL`.
+PDF generation is handled by `jspdf` bundled into the Service Worker.
 
 ## 3. Components
-*   **Manifest (`manifest.json`)**: V3 definition requesting `contextMenus`, `tabs`, and `downloads` permissions.
+*   **Manifest (`manifest.json`)**: V3 definition requesting `contextMenus`, `tabs`, `downloads`, and `offscreen` permissions.
 *   **Service Worker (`src/background.ts`)**:
-    *   Registers Context Menus on install.
-    *   Handles menu clicks to query tabs (Highlighted/Selected or All).
-    *   Formats the data (TXT, MD, PDF via `jspdf`).
-    *   Triggers downloads via Data URIs.
-*   **Development Environment (`.devcontainer/devcontainer.json`, `package.json`)**: Node.js-based Devcontainer to enforce consistent styling and linting (ESLint, Prettier) and provide build scripts via `esbuild`.
+    *   Registers Context Menus.
+    *   Queries and filters tabs.
+    *   Masks sensitive query parameters.
+    *   Formats data and manages the download flow (Data URI vs. Offscreen Blob).
+*   **Offscreen Document (`offscreen.html`/`.ts`)**: A lightweight page used solely for generating Blob URLs for large data sets.
+*   **Development Environment**: Node.js-based Devcontainer with ESLint and Prettier.
 
 ## 4. Data Flow
-1.  User right-clicks anywhere on the page or extension icon.
-2.  User selects a context menu option (e.g., "Download Highlighted Tabs as MD").
-3.  Service Worker receives the click event.
-4.  Service Worker queries `chrome.tabs` based on the selected scope (highlighted/selected or current window).
-5.  Data is parsed and formatted into the requested type.
-6.  A Data URI is constructed (using `jspdf` for PDF).
-7.  `chrome.downloads.download` is called with the URI to save the file locally.
+1.  User clicks a context menu item (e.g., "Download Highlighted Tabs as PDF").
+2.  Service Worker queries `chrome.tabs`.
+3.  Data is parsed: Sensitive query parameters (`token`, `key`, etc.) are masked by default.
+4.  Service Worker formats the data into a string or PDF binary.
+5.  **Download Decision**:
+    *   If encoded size < 2MB: Use `chrome.downloads.download` with a Data URI.
+    *   If encoded size >= 2MB: Launch `offscreen.html`, send data via messaging, receive a Blob URL, and then call `chrome.downloads.download`.
+6.  The file is saved locally.
 
 ## 5. Error Handling & Policies
-*   **Restricted URLs**: Tabs with `chrome://`, `file://`, or other restricted schemes will be skipped. A fallback placeholder or log entry will be created.
-*   **Download Failures**: Failures in `chrome.downloads.download` (e.g., permission denied, disk full) will be caught using `chrome.runtime.lastError`. Errors will be logged, and the user will be notified where possible.
-*   **Fallback Strings**: Default strings (e.g., "Untitled", "No URL") will be used for missing data to ensure consistent output.
-*   **Long Text Processing (PDF)**: To prevent text from overflowing page boundaries:
-    1.  **Auto-wrap**: Titles and URLs will be wrapped using `jspdf`'s `splitTextToSize`.
-    2.  **Pagination**: If wrapped content exceeds the page height, a new page will be added automatically.
+*   **Restricted URLs**: Tabs with `chrome://` or `file://` schemes are skipped with a log entry.
+*   **Download Failures**: Errors in `chrome.downloads.download` (captured via `chrome.runtime.lastError`) trigger a log and user notification.
+*   **Long Text (PDF)**: 
+    *   **Auto-wrap**: Uses `splitTextToSize` for titles and URLs.
+    *   **Pagination**: Automatically adds new pages when vertical space is exhausted.
+*   **機密データのリダクション**: 既定でクエリパラメータ名 `token`, `key`, `access_token`, `auth`, `password`, `secret` をマスク（`<redacted>` に置換）します。
+    *   **オプトアウト**: `enableDefaultMasking: false` 設定（将来的にオプション画面で提供）により、この機能を無効化可能です。
 
 ## 6. Security & Privacy Considerations
-*   **Local Processing Only**: All tab data is processed locally within the extension's Service Worker. No data is transmitted off-device or stored permanently.
-*   **Sensitive Data**: URLs containing sensitive tokens (e.g., `?token=...`, `?key=...`) should be handled with care. The extension does not perform additional redaction by default but adheres to a strict "no-telemetry" policy.
-*   **Content Security Policy (CSP)**: The extension uses a strict CSP in `manifest.json`. No `unsafe-eval` or remote scripts are permitted.
-*   **Minimal Permissions**: The extension only requests `tabs`, `downloads`, and `contextMenus`, providing clear rationale for each in the documentation.
+*   **Local Processing**: Tab data never leaves the device.
+*   **Sensitive Data Masking**: Active by default to prevent accidental exposure of credentials in exported files.
+*   **CSP**: Strict policy in `manifest.json` disallowing `unsafe-eval` and remote scripts.
+*   **Minimal Permissions**: Requests `tabs`, `downloads`, `contextMenus`, and `offscreen` with clear rationale.
 
 ## 7. Testing Strategy
-*   Manual end-to-end testing by loading the unpacked extension.
-*   Verify context menu creation.
-*   Verify all 6 combinations (Highlighted/All x TXT/MD/PDF) output correct data.
-*   Verify ESLint and Prettier pass in the Devcontainer.
-*   Verify handling of long titles and restricted URLs.
+*   **Confirm** context menu registration on extension installation.
+*   **Ensure** all 6 combinations (Highlighted/All x TXT/MD/PDF) output accurate data.
+*   **Verify** that sensitive tokens are correctly masked in the output files.
+*   **Check** that large exports (tested with > 100 tabs) successfully download via the Offscreen/Blob path.
+*   **Validate** ESLint and Prettier compliance within the Devcontainer.
+*   **Evaluate** handling of long titles and pagination in the generated PDF.
