@@ -1,152 +1,127 @@
-import { jsPDF } from 'jspdf';
+import JSZip from 'jszip';
 
 // --- Constants & Types ---
-const MASKED_PARAMS = ['token', 'key', 'access_token', 'auth', 'password', 'secret'];
 const LARGE_FILE_THRESHOLD = 2 * 1024 * 1024; // 2MB
-
-type ExportFormat = 'txt' | 'md' | 'pdf';
 type ExportScope = 'highlighted' | 'all';
 
 // --- Initialization ---
 chrome.runtime.onInstalled.addListener(() => {
-  const scopes: { id: ExportScope; label: string }[] = [
-    { id: 'highlighted', label: 'Highlighted Tabs' },
-    { id: 'all', label: 'All Tabs' },
-  ];
-
-  const formats: { id: ExportFormat; label: string }[] = [
-    { id: 'txt', label: 'TXT' },
-    { id: 'md', label: 'Markdown' },
-    { id: 'pdf', label: 'PDF' },
-  ];
-
-  scopes.forEach((scope) => {
+  chrome.contextMenus.removeAll(() => {
     chrome.contextMenus.create({
-      id: scope.id,
-      title: `Download ${scope.label} as...`,
+      id: 'export-zip-highlighted',
+      title: 'Download Highlighted Tabs as ZIP',
       contexts: ['action', 'page'],
     });
 
-    formats.forEach((format) => {
-      chrome.contextMenus.create({
-        id: `${scope.id}-${format.id}`,
-        parentId: scope.id,
-        title: format.label,
-        contexts: ['action', 'page'],
-      });
+    chrome.contextMenus.create({
+      id: 'export-zip-all',
+      title: 'Download All Tabs as ZIP',
+      contexts: ['action', 'page'],
     });
   });
 });
 
 // --- Event Handling ---
 chrome.contextMenus.onClicked.addListener((info) => {
-  const [scope, format] = (info.menuItemId as string).split('-') as [ExportScope, ExportFormat];
-  if (scope && format) {
-    handleExport(scope, format);
+  if (info.menuItemId === 'export-zip-highlighted') {
+    handleExport('highlighted');
+  } else if (info.menuItemId === 'export-zip-all') {
+    handleExport('all');
   }
 });
 
-async function handleExport(scope: ExportScope, format: ExportFormat) {
+async function handleExport(scope: ExportScope) {
   try {
     const queryOptions = scope === 'highlighted' ? { highlighted: true, currentWindow: true } : {};
     const tabs = await chrome.tabs.query(queryOptions);
 
     const filteredTabs = tabs.filter(
-      (t) => t.url && !t.url.startsWith('chrome://') && !t.url.startsWith('file://')
+      (t) => t.id && t.url && !t.url.startsWith('chrome://') && !t.url.startsWith('file://')
     );
 
-    const processedData = filteredTabs.map((t) => ({
-      title: t.title || 'No Title',
-      url: maskUrl(t.url || ''),
-    }));
-
-    if (format === 'pdf') {
-      await exportAsPdf(processedData);
-    } else {
-      await exportAsText(processedData, format);
+    if (filteredTabs.length === 0) {
+      console.warn('No valid tabs to export.');
+      return;
     }
+
+    const zip = new JSZip();
+    const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+
+    // 1. Collect all data first
+    const results = await Promise.all(
+      filteredTabs.map(async (t, index) => {
+        try {
+          const urlString = t.url!;
+          const url = new URL(urlString);
+          const rawTitle = (t.title || `tab-${index}`).replace(/[\/\\?%*:|"<>]/g, '_');
+
+          // 1. Get info from the tab
+          const scriptingResults = await chrome.scripting.executeScript({
+            target: { tabId: t.id! },
+            func: () => ({
+              contentType: document.contentType,
+              outerHTML: document.documentElement.outerHTML,
+              innerText: document.body.innerText,
+            }),
+          });
+          const info = scriptingResults[0]?.result;
+          const contentType = info?.contentType || '';
+
+          // 2. Determine extension
+          const pathParts = url.pathname.split('.');
+          const urlExtension = pathParts.length > 1 ? pathParts.pop()?.toLowerCase() : '';
+
+          let extension = 'html';
+          let data: string | Blob = info?.outerHTML || '';
+
+          if (contentType === 'application/pdf' || url.pathname.toLowerCase().endsWith('.pdf')) {
+            extension = 'pdf';
+            const response = await fetch(urlString);
+            data = await response.blob();
+          } else if (contentType === 'text/plain') {
+            extension = urlExtension || 'txt';
+            data = info?.innerText || '';
+          } else if (urlExtension && ['md', 'txt', 'json', 'xml', 'csv'].includes(urlExtension)) {
+            extension = urlExtension;
+            data = info?.innerText || info?.outerHTML || '';
+          }
+
+          return { title: rawTitle, extension, data };
+        } catch (e) {
+          console.error(`Failed to capture tab ${t.id}:`, e);
+          return { title: `failed-tab-${index}`, extension: 'txt', data: `URL: ${t.url}\nError: ${e}` };
+        }
+      })
+    );
+
+    // 2. Add to ZIP with uniqueness check
+    const usedNames = new Map<string, number>();
+    for (const item of results) {
+      let fileName = `${item.title}.${item.extension}`;
+      if (usedNames.has(fileName)) {
+        const count = usedNames.get(fileName)! + 1;
+        usedNames.set(fileName, count);
+        fileName = `${item.title} (${count}).${item.extension}`;
+      } else {
+        usedNames.set(fileName, 0);
+      }
+      zip.file(fileName, item.data);
+    }
+
+    const zipContent = await zip.generateAsync({ type: 'uint8array' });
+    const filename = `tabs-archive-${timestamp}.zip`;
+    await downloadFile(zipContent.buffer, 'application/zip', filename);
   } catch (error) {
     console.error('Export failed:', error);
   }
 }
 
-// --- Logic Helpers ---
-function maskUrl(urlString: string): string {
-  try {
-    const url = new URL(urlString);
-    MASKED_PARAMS.forEach((param) => {
-      if (url.searchParams.has(param)) {
-        url.searchParams.set(param, '<redacted>');
-      }
-    });
-    return url.toString();
-  } catch {
-    return urlString;
-  }
-}
-
-async function exportAsText(data: { title: string; url: string }[], format: ExportFormat) {
-  let content = '';
-  let mimeType = 'text/plain';
-  let extension = 'txt';
-
-  if (format === 'md') {
-    content = data.map((t) => `- [${t.title}](${t.url})`).join('\n');
-    mimeType = 'text/markdown';
-    extension = 'md';
-  } else {
-    content = data.map((t) => `${t.title}\n${t.url}`).join('\n\n');
-  }
-
-  const filename = `tabs-export-${new Date().toISOString().split('T')[0]}.${extension}`;
-  await downloadFile(content, mimeType, filename);
-}
-
-async function exportAsPdf(data: { title: string; url: string }[]) {
-  const doc = new jsPDF();
-  const pageWidth = doc.internal.pageSize.getWidth();
-  const margin = 10;
-  const contentWidth = pageWidth - margin * 2;
-  let y = 20;
-
-  doc.setFontSize(16);
-  doc.text('Tab Export', margin, y);
-  y += 10;
-
-  doc.setFontSize(10);
-  for (const item of data) {
-    if (y > 280) {
-      doc.addPage();
-      y = 20;
-    }
-
-    const titleLines = doc.splitTextToSize(`Title: ${item.title}`, contentWidth);
-    doc.text(titleLines, margin, y);
-    y += titleLines.length * 5;
-
-    const urlLines = doc.splitTextToSize(`URL: ${item.url}`, contentWidth);
-    doc.setTextColor(0, 0, 255);
-    doc.text(urlLines, margin, y);
-    doc.setTextColor(0, 0, 0);
-    y += urlLines.length * 5 + 5;
-  }
-
-  const pdfOutput = doc.output('arraybuffer');
-  const filename = `tabs-export-${new Date().toISOString().split('T')[0]}.pdf`;
-  await downloadFile(pdfOutput, 'application/pdf', filename);
-}
-
-async function downloadFile(data: string | ArrayBuffer, mimeType: string, filename: string) {
+async function downloadFile(data: ArrayBuffer, mimeType: string, filename: string) {
   let url: string;
-
-  const size = typeof data === 'string' ? new Blob([data]).size : data.byteLength;
+  const size = data.byteLength;
 
   if (size < LARGE_FILE_THRESHOLD) {
-    const base64 =
-      typeof data === 'string'
-        ? btoa(unescape(encodeURIComponent(data)))
-        : arrayBufferToBase64(data);
-    url = `data:${mimeType};base64,${base64}`;
+    url = `data:${mimeType};base64,${arrayBufferToBase64(data)}`;
   } else {
     url = await createBlobUrlOffscreen(data, mimeType);
   }
@@ -156,18 +131,13 @@ async function downloadFile(data: string | ArrayBuffer, mimeType: string, filena
     filename: filename,
     saveAs: true,
   });
-
-  if (url.startsWith('blob:')) {
-    // Revoke URL would be good, but we need to ensure download started
-    // For simplicity in this version, we leave it to browser cleanup or handle in offscreen
-  }
 }
 
-async function createBlobUrlOffscreen(data: string | ArrayBuffer, mimeType: string): Promise<string> {
+async function createBlobUrlOffscreen(data: ArrayBuffer, mimeType: string): Promise<string> {
   await chrome.offscreen.createDocument({
     url: 'offscreen.html',
-    reasons: [chrome.offscreen.Reason.LOCAL_STORAGE], // Using LOCAL_STORAGE as a generic reason
-    justification: 'Generate Blob URL for large downloads',
+    reasons: [chrome.offscreen.Reason.LOCAL_STORAGE],
+    justification: 'Generate Blob URL for large ZIP downloads',
   });
 
   const url = await chrome.runtime.sendMessage({

@@ -7,15 +7,15 @@
     "contextMenus",
     "tabs",
     "downloads",
-    "offscreen"
+    "offscreen",
+    "scripting"
+  ],
+  "host_permissions": [
+    "<all_urls>"
   ],
   "background": {
     "service_worker": "dist/background.js",
     "type": "module"
   },
-  "minimum_chrome_version": "109",
-  "icons": {
-    "48": "icons/icon48.png",
-    "128": "icons/icon128.png"
-  }
+  "minimum_chrome_version": "109"
 }
