@@ -1,8 +1,8 @@
-# Tab Exporter Extension Implementation Plan
+# Tab Exporter Extension Implementation Plan (2026-04-20)
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Build a Chrome Extension to extract URLs and titles of selected or all tabs and download them as TXT, MD, or PDF files.
+**Goal:** Build a Chrome Extension to extract URLs and titles of highlighted or all tabs and download them as TXT, MD, or PDF files.
 
 **Architecture:** A Manifest V3 extension relying entirely on a Service Worker (`background.ts`). Context menus trigger the actions, tabs are queried, and data is formatted into Data URIs which are downloaded. `jspdf` is bundled into the Service Worker via `esbuild`.
 
@@ -10,12 +10,15 @@
 
 ---
 
-### Task 1: Setup Development Environment
+## Task 1: Setup Development Environment
 
 **Files:**
 - Create: `.devcontainer/devcontainer.json`
 - Create: `package.json`
 - Create: `tsconfig.json`
+- Create: `.eslintrc.json`
+- Create: `.prettierrc`
+- Create: `.gitignore`
 
 - [ ] **Step 1: Create devcontainer configuration**
   Create `.devcontainer/devcontainer.json`:
@@ -42,7 +45,7 @@
   }
   ```
 
-- [ ] **Step 2: Create package.json**
+- [ ] **Step 2: Create package.json with updated dependencies**
   Create `package.json`:
   ```json
   {
@@ -57,21 +60,48 @@
       "test": "npm run lint && npm run build"
     },
     "dependencies": {
-      "jspdf": "^2.5.1"
+      "jspdf": "^2.5.2"
     },
     "devDependencies": {
       "@types/chrome": "^0.0.280",
       "@typescript-eslint/eslint-plugin": "^7.0.0",
       "@typescript-eslint/parser": "^7.0.0",
-      "esbuild": "^0.20.0",
-      "eslint": "^8.56.0",
+      "esbuild": "^0.20.2",
+      "eslint": "^8.57.0",
       "prettier": "^3.2.5",
       "typescript": "^5.3.3"
     }
   }
   ```
 
-- [ ] **Step 3: Create tsconfig.json**
+- [ ] **Step 3: Create configuration files (.eslintrc.json, .prettierrc, .gitignore, tsconfig.json)**
+  Create `.eslintrc.json`:
+  ```json
+  {
+    "parser": "@typescript-eslint/parser",
+    "plugins": ["@typescript-eslint"],
+    "extends": ["eslint:recommended", "plugin:@typescript-eslint/recommended"],
+    "env": {
+      "webextensions": true,
+      "es2022": true
+    }
+  }
+  ```
+  Create `.prettierrc`:
+  ```json
+  {
+    "singleQuote": true,
+    "trailingComma": "es5",
+    "tabWidth": 2
+  }
+  ```
+  Create `.gitignore`:
+  ```text
+  node_modules/
+  dist/
+  package-lock.json
+  .DS_Store
+  ```
   Create `tsconfig.json`:
   ```json
   {
@@ -93,17 +123,17 @@
 - [ ] **Step 4: Install dependencies and verify environment**
   Run: `npm install`
   Run: `npm run test`
-  Expected: Command fails or warns about missing `src/background.ts`. This confirms scripts are wired.
+  Expected: Command fails due to missing `src/background.ts`.
 
 - [ ] **Step 5: Commit**
   ```bash
-  git add .devcontainer/devcontainer.json package.json tsconfig.json package-lock.json
-  git commit -m "chore: setup development environment"
+  git add .devcontainer/devcontainer.json package.json tsconfig.json .eslintrc.json .prettierrc .gitignore
+  git commit -m "chore: setup development environment with configs and updated dependencies"
   ```
 
 ---
 
-### Task 2: Setup Extension Manifest and Boilerplate
+## Task 2: Setup Extension Manifest and Boilerplate
 
 **Files:**
 - Create: `manifest.json`
@@ -116,7 +146,7 @@
     "manifest_version": 3,
     "name": "Tab Exporter",
     "version": "1.0.0",
-    "description": "Export selected or all tabs to TXT, MD, or PDF.",
+    "description": "Export highlighted or all tabs to TXT, MD, or PDF.",
     "permissions": [
       "contextMenus",
       "tabs",
@@ -148,17 +178,17 @@
 
 ---
 
-### Task 3: Implement Context Menu Registration
+## Task 3: Implement Context Menu Registration
 
 **Files:**
 - Modify: `src/background.ts`
 
 - [ ] **Step 1: Write context menu registration logic**
-  Update `src/background.ts` to include context menus:
+  Update `src/background.ts`:
   ```typescript
   chrome.runtime.onInstalled.addListener(() => {
     const scopes = [
-      { id: 'selected', title: 'Selected Tabs' },
+      { id: 'highlighted', title: 'Highlighted Tabs (Current selection)' },
       { id: 'all', title: 'All Tabs' }
     ];
     const formats = ['TXT', 'MD', 'PDF'];
@@ -177,26 +207,25 @@
 
 - [ ] **Step 2: Verify build**
   Run: `npm run build`
-  Expected: Successful build with no TypeScript errors.
+  Expected: Successful build.
 
 - [ ] **Step 3: Commit**
   ```bash
   git add src/background.ts
-  git commit -m "feat: register context menus on install"
+  git commit -m "feat: register context menus for highlighted/all tabs"
   ```
 
 ---
 
-### Task 4: Implement Tab Querying Logic
+## Task 4: Implement Tab Querying Logic
 
 **Files:**
 - Modify: `src/background.ts`
 
 - [ ] **Step 1: Write Context Menu onClick listener**
-  Append to `src/background.ts`:
+  Update `src/background.ts`:
   ```typescript
-  // Stub for exportData (to be implemented later)
-  async function exportData(tabs: {title: string, url: string}[], format: string) {
+  async function exportData(tabs: { title: string; url: string }[], format: string) {
     console.log(`Exporting ${tabs.length} tabs as ${format}`);
   }
 
@@ -204,21 +233,23 @@
     if (typeof info.menuItemId !== 'string' || !info.menuItemId.startsWith('export_')) return;
 
     const parts = info.menuItemId.split('_');
-    if (parts.length !== 3) return;
-    const scope = parts[1]; // 'selected' | 'all'
+    const scope = parts[1]; // 'highlighted' | 'all'
     const format = parts[2]; // 'txt' | 'md' | 'pdf'
 
     try {
       const queryOptions: chrome.tabs.QueryInfo = { currentWindow: true };
-      if (scope === 'selected') {
+      if (scope === 'highlighted') {
         queryOptions.highlighted = true;
       }
 
       const tabs = await chrome.tabs.query(queryOptions);
-      const tabData = tabs.map(t => ({
-        title: t.title || 'Untitled',
-        url: t.url || 'No URL'
-      }));
+      // Skip restricted URLs
+      const tabData = tabs
+        .filter(t => t.url && !t.url.startsWith('chrome://') && !t.url.startsWith('file://'))
+        .map(t => ({
+          title: t.title || 'Untitled',
+          url: t.url || 'No URL'
+        }));
 
       await exportData(tabData, format);
     } catch (error) {
@@ -229,38 +260,43 @@
 
 - [ ] **Step 2: Verify build**
   Run: `npm run build`
-  Expected: Successful build.
 
 - [ ] **Step 3: Commit**
   ```bash
   git add src/background.ts
-  git commit -m "feat: handle context menu clicks and query tabs"
+  git commit -m "feat: handle menu clicks with tab filtering"
   ```
 
 ---
 
-### Task 5: Implement Export Logic (TXT and MD)
+## Task 5: Implement Export Logic (TXT and MD with escaping)
 
 **Files:**
 - Modify: `src/background.ts`
 
-- [ ] **Step 1: Implement basic exports**
-  Update the `exportData` function in `src/background.ts`:
+- [ ] **Step 1: Add Markdown escaping helper and implement TXT/MD exports**
+  Update `src/background.ts`:
   ```typescript
-  async function exportData(tabs: {title: string, url: string}[], format: string) {
+  function escapeMarkdown(text: string): string {
+    return text.replace(/[\\`*_{}[\]()#+-.!]/g, '\\$&');
+  }
+
+  async function exportData(tabs: { title: string; url: string }[], format: string) {
     let dataUri = '';
     let filename = `tabs_export_${Date.now()}`;
 
     if (format === 'txt') {
-      const content = tabs.map(t => `${t.title}\n${t.url}\n`).join('\n');
+      const content = tabs.map(t => `${t.title}\n${t.url}`).join('\n\n');
       dataUri = `data:text/plain;charset=utf-8,${encodeURIComponent(content)}`;
       filename += '.txt';
     } else if (format === 'md') {
-      const content = tabs.map(t => `- [${t.title}](${t.url})`).join('\n');
+      const content = tabs
+        .map(t => `- [${escapeMarkdown(t.title)}](${t.url})`)
+        .join('\n');
       dataUri = `data:text/markdown;charset=utf-8,${encodeURIComponent(content)}`;
       filename += '.md';
     } else if (format === 'pdf') {
-      console.log('PDF export not yet implemented');
+      // To be implemented in Task 6
       return;
     }
 
@@ -269,6 +305,12 @@
         url: dataUri,
         filename: filename,
         saveAs: true
+      }, (downloadId) => {
+        if (chrome.runtime.lastError) {
+          console.error('Download failed:', chrome.runtime.lastError.message);
+        } else {
+          console.log('Download started with ID:', downloadId);
+        }
       });
     }
   }
@@ -276,67 +318,62 @@
 
 - [ ] **Step 2: Verify build**
   Run: `npm run build`
-  Expected: Successful build.
 
 - [ ] **Step 3: Commit**
   ```bash
   git add src/background.ts
-  git commit -m "feat: implement TXT and MD export formats"
+  git commit -m "feat: implement TXT and MD exports with escaping and error handling"
   ```
 
 ---
 
-### Task 6: Implement Export Logic (PDF via jspdf)
+## Task 6: Implement Export Logic (PDF with text wrapping)
 
 **Files:**
 - Modify: `src/background.ts`
 
-- [ ] **Step 1: Import jsPDF and implement PDF export**
-  Add the import at the top of `src/background.ts`:
+- [ ] **Step 1: Import jsPDF and implement wrapped PDF export**
+  Update `src/background.ts`:
   ```typescript
   import { jsPDF } from 'jspdf';
-  ```
-  And update the `format === 'pdf'` block in `exportData`:
-  ```typescript
-    } else if (format === 'pdf') {
-      const doc = new jsPDF();
-      let yPos = 10;
-      
-      tabs.forEach((t, index) => {
-        doc.text(`${index + 1}. ${t.title}`, 10, yPos);
-        doc.text(t.url, 15, yPos + 7);
-        yPos += 20;
-        
-        if (yPos > 280) {
-          doc.addPage();
-          yPos = 10;
-        }
-      });
-      dataUri = doc.output('datauristring');
-      filename += '.pdf';
+  // ... rest of imports/helpers
+
+  // Inside exportData format === 'pdf' block:
+  const doc = new jsPDF();
+  const pageWidth = doc.internal.pageSize.getWidth();
+  const margin = 10;
+  const maxLineWidth = pageWidth - margin * 2;
+  let yPos = margin;
+
+  tabs.forEach((t, index) => {
+    const titleLines = doc.splitTextToSize(`${index + 1}. ${t.title}`, maxLineWidth);
+    const urlLines = doc.splitTextToSize(t.url, maxLineWidth - 5);
+    const itemHeight = (titleLines.length + urlLines.length) * 7 + 5;
+
+    if (yPos + itemHeight > 280) {
+      doc.addPage();
+      yPos = margin;
     }
+
+    doc.setFont('helvetica', 'bold');
+    doc.text(titleLines, margin, yPos);
+    yPos += titleLines.length * 7;
+
+    doc.setFont('helvetica', 'normal');
+    doc.text(urlLines, margin + 5, yPos);
+    yPos += urlLines.length * 7 + 5;
+  });
+  dataUri = doc.output('datauristring');
+  filename += '.pdf';
   ```
 
-- [ ] **Step 2: Verify build**
-  Run: `npm run build`
-  Expected: Successful build with esbuild correctly bundling jsPDF.
-
-- [ ] **Step 3: Verify formatting and linting**
+- [ ] **Step 2: Final Verification and Formatting**
   Run: `npm run lint`
   Run: `npm run format`
-  Expected: Passes, potentially auto-fixing any style issues.
+  Run: `npm run build`
 
-- [ ] **Step 4: Commit**
+- [ ] **Step 3: Commit**
   ```bash
   git add src/background.ts
-  git commit -m "feat: implement PDF export format using jspdf"
+  git commit -m "feat: implement PDF export with text wrapping and pagination"
   ```
-
----
-**Verification (Manual):**
-After all tasks are complete:
-1. Open Chrome and navigate to `chrome://extensions/`.
-2. Enable "Developer mode".
-3. Click "Load unpacked" and select the extension directory.
-4. Open a few tabs. Right-click on a page and verify the context menus appear.
-5. Click each menu item and verify that a file is downloaded and its contents are correct.
