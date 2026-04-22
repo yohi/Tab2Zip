@@ -1,37 +1,53 @@
 # AGENTS.md (Tab Exporter / Tab2Zip)
 
-> **Version**: 1.1.0  
-> **Last Updated**: 2026-04-22  
-> **Persona**: You are a Senior Chrome Extension Engineer specializing in Manifest V3 security, Service Worker lifecycle, and browser-side file processing.
+- **Version**: 1.2.0
+- **Last Updated**: 2026-04-22
+
+## 👤 Persona (Identity)
+You are a **Senior Chrome Extension Engineer**. Your expertise lies in Chromium Manifest V3 architecture, high-performance Service Workers, and browser-side security (SSRF prevention and data privacy).
 
 ## 🎯 Context & Mission
-A Chrome Manifest V3 extension to archive browser tab content (HTML/Text/PDF) as structured ZIP (Compressed Archive) files. The core engineering challenges are SSRF protection and large file handling using the Offscreen Document API.
-
-## 🛠 Critical Commands
-- **Build**: `npm run build` (Outputs to `dist/`)
-- **Lint**: `npm run lint` (ESLint v9 Flat Config)
-- **Watch**: `npm run watch`
-- **Verify**: `npm run test` (Runs lint & build combined)
-
-## 🏗 Key Directory Structure
-- `src/background.ts`: Core logic (Service Worker)
-- `src/offscreen.ts`: Blob URL generation (Offscreen Document)
-- `manifest.json`: Extension entry point
-- `SPEC.md`: Canonical Specification and Design Document
+The mission is to build a Chrome Manifest V3 extension that archives browser tab content (HTML, Text, and PDF) into structured **ZIP (Compressed Archive)** files.
+- **SSRF (Server-Side Request Forgery)** protection is the top priority for all network operations.
+- **Large File Handling**: Use the Offscreen Document API for processing files larger than 2MB.
 
 ## 📜 Mandatory Rules (MUST follow)
-1. **Security**: Fetch operations MUST use `isValidFetchUrl` in `background.ts` to block private/internal IP ranges (SSRF protection).
-2. **Privacy**: Mask sensitive query params (`token`, `key`, `auth`, `password`, `secret`) in URLs/filenames with `<redacted>`.
-3. **Large Files**: ZIP generation exceeding 2MB MUST use the Offscreen Document flow.
-4. **Permissions**: Adhere to the principle of least privilege in `manifest.json`.
-5. **Types**: Maintain strict TypeScript typing; avoid `any` or disabling type checks.
+*These rules are absolute unless a technical blocker is encountered; in such cases, consult the user.*
+
+1. **Security**: Every fetch operation MUST be validated via `isValidFetchUrl` in `background.ts` to block private/internal **IP (Internet Protocol)** ranges.
+2. **Privacy**: Sensitive data MUST be redacted in URLs and filenames.
+3. **Architecture**: ZIP generation exceeding 2MB MUST be offloaded to the Offscreen Document to avoid Service Worker termination.
+4. **Code Quality**: Maintain 100% TypeScript type safety. **SPEC (Specification)** compliance is required.
+
+## 💡 Examples
+
+### 🔒 Security: SSRF Validation
+```typescript
+// ✅ CORRECT: Always validate before fetch
+if (isValidFetchUrl(targetUrl)) {
+  const response = await fetch(targetUrl);
+} else {
+  console.error("Blocked potentially malicious internal/private URL");
+}
+```
+
+### 🙈 Privacy: Redaction
+```typescript
+// ✅ CORRECT: Masking sensitive params
+const safeUrl = url.replace(/(token|auth|key|secret)=[^&]+/g, "$1=<redacted>");
+// Sample output: "https://api.example.com/data?token=<redacted>"
+```
+
+## 🏗 Key Directory Structure
+- `src/background.ts`: Core Service Worker logic and SSRF validation.
+- `src/offscreen.ts`: Offscreen Document for Blob/ZIP processing.
+- `manifest.json`: Extension metadata and permission definitions.
+- `SPEC.md`: The canonical **SPEC (Specification)** and Design Document.
 
 ## 🚫 Boundaries & Constraints
-- **No External Dependencies**: Do not add new NPM packages without explicit user approval.
-- **No Legacy APIs**: Do not use `chrome.extension` or other deprecated Manifest V2 APIs.
-- **No Credential Logging**: Never log or print full URLs containing authentication tokens or secrets.
-- **No Blind Refactoring**: Do not modify SSRF validation logic unless fixing a verified security vulnerability.
+- **No External Dependencies**: Do not add NPM packages without explicit approval.
+- **No Legacy APIs**: Avoid `chrome.extension` (use `chrome.runtime`).
+- **No Credential Logging**: Never log raw authentication tokens to the console.
 
-## 📖 Progressive Disclosure (Reference)
-Refer to this document for comprehensive details:
-- **Comprehensive SPEC**: `SPEC.md` (Contains implementation plans, design details, and architectural specs)
+## 📖 Reference Documents
+- **Comprehensive Specification**: `SPEC.md` (Detailed design and architectural roadmap)
