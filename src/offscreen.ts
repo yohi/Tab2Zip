@@ -22,18 +22,16 @@ function isOffscreenMessage(message: unknown): message is OffscreenMessage {
 }
 
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
-  if (!isOffscreenMessage(message)) {
-    return false;
+  if (isOffscreenMessage(message)) {
+    if (message.type === 'create-blob-url') {
+      const blob = new Blob([message.data], { type: message.mimeType });
+      const url = URL.createObjectURL(blob);
+      sendResponse(url);
+    } else if (message.type === 'revoke-blob-url') {
+      URL.revokeObjectURL(message.url);
+      sendResponse(true);
+    }
+    return true;
   }
-
-  if (message.type === 'create-blob-url') {
-    const blob = new Blob([message.data], { type: message.mimeType });
-    const url = URL.createObjectURL(blob);
-    sendResponse(url);
-  } else if (message.type === 'revoke-blob-url') {
-    URL.revokeObjectURL(message.url);
-    sendResponse(true);
-  }
-
-  return true;
+  return false;
 });

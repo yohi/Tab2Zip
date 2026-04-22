@@ -9,10 +9,9 @@ const BLACKLIST_SCHEMES = ['chrome://', 'file://', 'edge://', 'about:', 'brave:/
 interface TabCaptureResult {
   title: string;
   extension: string;
-  capturedHtmlContentOrBlob: string | Blob;
+  fileContent: string | Blob;
 }
 
-// Define extension of chrome.runtime for getContexts using intersection type
 interface ChromeContext {
   contextId: string;
   contextType: string;
@@ -52,19 +51,29 @@ chrome.contextMenus.onClicked.addListener(async (info) => {
   }
 });
 
+/**
+ * Validates the URL to mitigate SSRF risks.
+ */
+function isValidFetchUrl(url: URL): boolean {
+  // Only allow http and https
+  if (url.protocol !== 'http:' && url.protocol !== 'https:') {
+    return false;
+  }
+  // Block common local/private hostnames as a basic safety measure
+  const hostname = url.hostname.toLowerCase();
+  const blockedHosts = ['localhost', '127.0.0.1', '::1', '0.0.0.0'];
+  return !blockedHosts.includes(hostname);
+}
+
 async function captureTabData(tab: { id: number; url: string; title?: string }, index: number): Promise<TabCaptureResult> {
   try {
-    const urlString = tab.url;
-    const url = new URL(urlString);
-    
-    // Secure scheme check for fetch
-    if (url.protocol !== 'http:' && url.protocol !== 'https:') {
-      throw new Error(`Insecure protocol: ${url.protocol}`);
+    const url = new URL(tab.url);
+    if (!isValidFetchUrl(url)) {
+      throw new Error(`Invalid or insecure URL: ${tab.url}`);
     }
 
-    const rawTitle = (tab.title || `tab-${index}`).replace(/[\/\\?%*:|"<>]/g, '_');
+    const safeTitle = (tab.title || `tab-${index}`).replace(/[\/\\?%*:|"<>]/g, '_');
 
-    // 1. Get info from the tab
     const scriptingResults = await chrome.scripting.executeScript({
       target: { tabId: tab.id },
       func: () => ({
@@ -73,196 +82,148 @@ async function captureTabData(tab: { id: number; url: string; title?: string }, 
         innerText: document.body.innerText,
       }),
     });
+    
     const info = scriptingResults[0]?.result;
     const contentType = info?.contentType || '';
-
-    // 2. Determine extension
     const pathParts = url.pathname.split('.');
-    const urlExtension = pathParts.length > 1 ? pathParts.pop()?.toLowerCase() : '';
+    const urlExt = pathParts.length > 1 ? pathParts.pop()?.toLowerCase() : '';
 
-    let extension = 'html';
-    let htmlContentOrBlob: string | Blob = info?.outerHTML || '';
+    let ext = 'html';
+    let content: string | Blob = info?.outerHTML || '';
 
     if (contentType === 'application/pdf' || url.pathname.toLowerCase().endsWith('.pdf')) {
-      extension = 'pdf';
+      ext = 'pdf';
       const controller = new AbortController();
-      const timeoutId = setTimeout(() => {
-        controller.abort();
-      }, 10000);
+      const timeoutId = setTimeout(() => controller.abort(), 10000);
 
       try {
-        const fetchUrl = url.toString();
-        const response = await fetch(fetchUrl, { 
+        const response = await fetch(url.toString(), { 
           credentials: 'include',
           signal: controller.signal
         });
-        if (!response.ok) {
-          throw new Error(`HTTP error! status: ${response.status}`);
-        }
-        htmlContentOrBlob = await response.blob();
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        content = await response.blob();
       } catch (err: unknown) {
-        if (err instanceof Error && err.name === 'AbortError') {
-          throw new Error('PDF download timed out');
-        }
+        if (err instanceof Error && err.name === 'AbortError') throw new Error('Timeout');
         throw err;
       } finally {
         clearTimeout(timeoutId);
       }
     } else if (contentType === 'text/plain') {
-      extension = urlExtension || 'txt';
-      htmlContentOrBlob = info?.innerText || '';
-    } else if (urlExtension && ['md', 'txt', 'json', 'xml', 'csv'].includes(urlExtension)) {
-      extension = urlExtension;
-      htmlContentOrBlob = info?.innerText || info?.outerHTML || '';
+      ext = urlExt || 'txt';
+      content = info?.innerText || '';
+    } else if (urlExt && ['md', 'txt', 'json', 'xml', 'csv'].includes(urlExt)) {
+      ext = urlExt;
+      content = info?.innerText || info?.outerHTML || '';
     }
 
-    return { title: rawTitle, extension, capturedHtmlContentOrBlob: htmlContentOrBlob };
+    return { title: safeTitle, extension: ext, fileContent: content };
   } catch (e) {
-    console.error(`Failed to capture tab ${tab.id}:`, e);
-    return { title: `failed-tab-${index}`, extension: 'txt', capturedHtmlContentOrBlob: `URL: ${tab.url}\nError: ${e}` };
+    console.error(`Failed ${tab.id}:`, e);
+    return { title: `failed-${index}`, extension: 'txt', fileContent: `URL: ${tab.url}\nError: ${e}` };
   }
+}
+
+function getFilteredTabs(tabs: chrome.tabs.Tab[]) {
+  return tabs.flatMap((t) => {
+    if (t.id !== undefined && t.url !== undefined && !BLACKLIST_SCHEMES.some(s => t.url?.startsWith(s))) {
+      return [{ id: t.id, url: t.url, title: t.title }];
+    }
+    return [];
+  });
 }
 
 async function handleExport(scope: ExportScope) {
   try {
     const queryOptions = scope === 'highlighted' ? { highlighted: true, currentWindow: true } : {};
-    const tabs = await chrome.tabs.query(queryOptions);
+    const rawTabs = await chrome.tabs.query(queryOptions);
+    const validTabs = getFilteredTabs(rawTabs);
 
-    const filteredTabs = tabs.flatMap((t) => {
-      if (t.id !== undefined && t.url !== undefined && !BLACKLIST_SCHEMES.some(s => t.url?.startsWith(s))) {
-        return [{ id: t.id, url: t.url, title: t.title }];
-      }
-      return [];
-    });
-
-    if (filteredTabs.length === 0) {
-      console.warn('No valid tabs to export.');
-      return;
-    }
+    if (validTabs.length === 0) return;
 
     const zip = new JSZip();
-    const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+    const results = await Promise.all(validTabs.map((t, i) => captureTabData(t, i)));
 
-    // 1. Collect all data first
-    const results = await Promise.all(
-      filteredTabs.map((t, index) => captureTabData(t, index))
-    );
-
-    // 2. Add to ZIP with uniqueness check
     const usedNames = new Map<string, number>();
     for (const item of results) {
       let fileName = `${item.title}.${item.extension}`;
-      const existingCount = usedNames.get(fileName);
-      if (existingCount !== undefined) {
-        const newCount = existingCount + 1;
+      const count = usedNames.get(fileName);
+      if (count !== undefined) {
+        const newCount = count + 1;
         usedNames.set(fileName, newCount);
         fileName = `${item.title} (${newCount}).${item.extension}`;
       } else {
         usedNames.set(fileName, 0);
       }
-      zip.file(fileName, item.capturedHtmlContentOrBlob);
+      zip.file(fileName, item.fileContent);
     }
 
     const zipContent = await zip.generateAsync({ type: 'uint8array' });
-    const filename = `tabs-archive-${timestamp}.zip`;
-    await downloadFile(zipContent.buffer, 'application/zip', filename);
+    const ts = new Date().toISOString().replace(/[:.]/g, '-');
+    await downloadFile(zipContent.buffer, 'application/zip', `tabs-${ts}.zip`);
   } catch (error) {
     console.error('Export failed:', error);
   }
 }
 
-async function downloadFile(data: ArrayBuffer, mimeType: string, filename: string) {
-  let downloadUrl: string;
-  const size = data.byteLength;
-  let isBlobDownload = false;
+async function downloadFile(data: ArrayBuffer, mime: string, name: string) {
+  let url: string;
+  let isBlob = false;
 
-  if (size < LARGE_FILE_THRESHOLD) {
-    downloadUrl = `data:${mimeType};base64,${arrayBufferToBase64(data)}`;
+  if (data.byteLength < LARGE_FILE_THRESHOLD) {
+    url = `data:${mime};base64,${arrayBufferToBase64(data)}`;
   } else {
-    downloadUrl = await createBlobUrlOffscreen(data, mimeType);
-    isBlobDownload = true;
+    url = await createBlobUrlOffscreen(data, mime);
+    isBlob = true;
   }
 
   try {
-    const downloadId = await chrome.downloads.download({
-      url: downloadUrl,
-      filename: filename,
-      saveAs: true,
-    });
-
-    if (isBlobDownload) {
-      const cleanupRevocation = () => {
-        chrome.downloads.onChanged.removeListener(onDownloadChanged);
-        chrome.runtime.sendMessage({ type: 'revoke-blob-url', url: downloadUrl }).catch(() => {
-          // Ignore errors
-        });
-        clearTimeout(fallbackTimeoutId);
+    const dId = await chrome.downloads.download({ url, filename: name, saveAs: true });
+    if (isBlob) {
+      const cleanup = () => {
+        chrome.downloads.onChanged.removeListener(onChange);
+        chrome.runtime.sendMessage({ type: 'revoke-blob-url', url }).catch(() => {});
+        clearTimeout(timer);
       };
-
-      const onDownloadChanged = (delta: chrome.downloads.DownloadDelta) => {
-        if (delta.id === downloadId && delta.state) {
-          const state = delta.state.current;
-          if (state === 'complete' || state === 'interrupted') {
-            cleanupRevocation();
-          }
-        }
+      const onChange = (d: chrome.downloads.DownloadDelta) => {
+        if (d.id === dId && d.state && (d.state.current === 'complete' || d.state.current === 'interrupted')) cleanup();
       };
-
-      chrome.downloads.onChanged.addListener(onDownloadChanged);
-
-      // Safe fallback (5 minutes)
-      const fallbackTimeoutId = setTimeout(() => {
-        cleanupRevocation();
-      }, 300000);
+      chrome.downloads.onChanged.addListener(onChange);
+      const timer = setTimeout(cleanup, 300000);
     }
   } catch (err) {
-    console.error('Download failed:', err);
+    console.error('Download error:', err);
   }
 }
 
 async function hasOffscreenDocument(): Promise<boolean> {
   // @ts-ignore
-  if (typeof chrome.offscreen.hasDocument === 'function') {
-    // @ts-ignore
-    return await chrome.offscreen.hasDocument();
-  }
-  // Fallback
-  const runtime = chrome.runtime as unknown as ChromeRuntimeWithContexts;
-  if (typeof runtime.getContexts === 'function') {
-    const contexts = await runtime.getContexts({
-      contextTypes: ['OFFSCREEN_DOCUMENT']
-    });
-    return contexts.length > 0;
+  if (typeof chrome.offscreen.hasDocument === 'function') return await chrome.offscreen.hasDocument();
+  const rt = chrome.runtime as unknown as ChromeRuntimeWithContexts;
+  if (typeof rt.getContexts === 'function') {
+    const ctxs = await rt.getContexts({ contextTypes: ['OFFSCREEN_DOCUMENT'] });
+    return ctxs.length > 0;
   }
   return false;
 }
 
-async function createBlobUrlOffscreen(data: ArrayBuffer, mimeType: string): Promise<string> {
+async function createBlobUrlOffscreen(data: ArrayBuffer, mime: string): Promise<string> {
   if (!(await hasOffscreenDocument())) {
     await chrome.offscreen.createDocument({
       url: 'offscreen.html',
       reasons: [chrome.offscreen.Reason.BLOBS],
-      justification: 'Generate Blob URL for large ZIP downloads',
+      justification: 'Large ZIP download',
     });
   }
-
-  const resultUrl = (await chrome.runtime.sendMessage({
-    type: 'create-blob-url',
-    data: data,
-    mimeType: mimeType,
-  })) as string;
-
-  return resultUrl;
+  return (await chrome.runtime.sendMessage({ type: 'create-blob-url', data, mimeType: mime })) as string;
 }
 
 function arrayBufferToBase64(buffer: ArrayBuffer): string {
   const bytes = new Uint8Array(buffer);
-  const CHUNK_SIZE = 0x8000; // 32KB
+  const CHUNK = 0x8000;
   const chunks: string[] = [];
-  
-  for (let i = 0; i < bytes.length; i += CHUNK_SIZE) {
-    chunks.push(String.fromCharCode.apply(null, Array.from(bytes.subarray(i, i + CHUNK_SIZE))));
+  for (let i = 0; i < bytes.length; i += CHUNK) {
+    chunks.push(String.fromCharCode.apply(null, Array.from(bytes.subarray(i, i + CHUNK))));
   }
-  
   return btoa(chunks.join(''));
 }
