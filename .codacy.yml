@@ -7,3 +7,4 @@ exclude_paths:
   # that are inherent to the browser extension functionality.
   - "src/background.ts"
   - "src/offscreen.ts"
+  - ".github/workflows/**"
