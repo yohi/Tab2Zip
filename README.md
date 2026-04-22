@@ -1,4 +1,4 @@
-# <img src="icons/icon1536.png" width="48" height="48" alt="Tab2Zip Icon" valign="middle"> Tab2Zip — Browser Tab Content Archiver
+# <img src="icons/icon128.png" width="48" height="48" alt="Tab2Zip Icon" valign="middle"> Tab2Zip — Browser Tab Content Archiver
 ### 「開いているタブ」を整理して、まるごとZIPで持ち出す。
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
