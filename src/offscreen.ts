@@ -13,27 +13,26 @@ interface RevokeBlobUrlMessage {
 
 type OffscreenMessage = CreateBlobUrlMessage | RevokeBlobUrlMessage;
 
-function isOffscreenMessage(message: any): message is OffscreenMessage {
-  return (
-    message &&
-    typeof message === 'object' &&
-    (message.type === 'create-blob-url' || message.type === 'revoke-blob-url')
-  );
+function isOffscreenMessage(message: unknown): message is OffscreenMessage {
+  if (message && typeof message === 'object') {
+    const msg = message as Record<string, unknown>;
+    return msg.type === 'create-blob-url' || msg.type === 'revoke-blob-url';
+  }
+  return false;
 }
 
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   if (!isOffscreenMessage(message)) {
-    return;
+    return false;
   }
 
   if (message.type === 'create-blob-url') {
     const blob = new Blob([message.data], { type: message.mimeType });
     const url = URL.createObjectURL(blob);
     sendResponse(url);
-    return true;
   } else if (message.type === 'revoke-blob-url') {
     URL.revokeObjectURL(message.url);
     sendResponse(true);
-    return true;
   }
+  return true;
 });

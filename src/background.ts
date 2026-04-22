@@ -6,6 +6,11 @@ type ExportScope = 'highlighted' | 'all';
 
 const BLACKLIST_SCHEMES = ['chrome://', 'file://', 'edge://', 'about:', 'brave://', 'view-source:', 'moz-extension://'];
 
+// Define extension of chrome.runtime for getContexts
+interface ChromeRuntimeWithContexts extends typeof chrome.runtime {
+  getContexts: (filter: { contextTypes: string[] }) => Promise<any[]>;
+}
+
 // --- Initialization ---
 chrome.runtime.onInstalled.addListener(() => {
   chrome.contextMenus.removeAll(() => {
@@ -25,10 +30,14 @@ chrome.runtime.onInstalled.addListener(() => {
 
 // --- Event Handling ---
 chrome.contextMenus.onClicked.addListener(async (info) => {
-  if (info.menuItemId === 'export-zip-highlighted') {
-    await handleExport('highlighted');
-  } else if (info.menuItemId === 'export-zip-all') {
-    await handleExport('all');
+  try {
+    if (info.menuItemId === 'export-zip-highlighted') {
+      await handleExport('highlighted');
+    } else if (info.menuItemId === 'export-zip-all') {
+      await handleExport('all');
+    }
+  } catch (error) {
+    console.error('Menu click handler failed:', error);
   }
 });
 
@@ -37,9 +46,12 @@ async function handleExport(scope: ExportScope) {
     const queryOptions = scope === 'highlighted' ? { highlighted: true, currentWindow: true } : {};
     const tabs = await chrome.tabs.query(queryOptions);
 
-    const filteredTabs = tabs.filter(
-      (t) => t.id !== undefined && t.url !== undefined && !BLACKLIST_SCHEMES.some(s => t.url?.startsWith(s))
-    );
+    const filteredTabs = tabs.flatMap((t) => {
+      if (t.id !== undefined && t.url !== undefined && !BLACKLIST_SCHEMES.some(s => t.url?.startsWith(s))) {
+        return [{ id: t.id, url: t.url, title: t.title }];
+      }
+      return [];
+    });
 
     if (filteredTabs.length === 0) {
       console.warn('No valid tabs to export.');
@@ -53,13 +65,19 @@ async function handleExport(scope: ExportScope) {
     const results = await Promise.all(
       filteredTabs.map(async (t, index) => {
         try {
-          const urlString = t.url || '';
+          const urlString = t.url;
           const url = new URL(urlString);
+          
+          // Secure scheme check for fetch
+          if (!['http:', 'https:'].includes(url.protocol)) {
+            throw new Error(`Insecure protocol: ${url.protocol}`);
+          }
+
           const rawTitle = (t.title || `tab-${index}`).replace(/[\/\\?%*:|"<>]/g, '_');
 
           // 1. Get info from the tab
           const scriptingResults = await chrome.scripting.executeScript({
-            target: { tabId: t.id! }, // id is checked in filter
+            target: { tabId: t.id },
             func: () => ({
               contentType: document.contentType,
               outerHTML: document.documentElement.outerHTML,
@@ -74,21 +92,21 @@ async function handleExport(scope: ExportScope) {
           const urlExtension = pathParts.length > 1 ? pathParts.pop()?.toLowerCase() : '';
 
           let extension = 'html';
-          let data: string | Blob = info?.outerHTML || '';
+          let contentData: string | Blob = info?.outerHTML || '';
 
           if (contentType === 'application/pdf' || url.pathname.toLowerCase().endsWith('.pdf')) {
             extension = 'pdf';
             const response = await fetch(urlString, { credentials: 'include' });
-            data = await response.blob();
+            contentData = await response.blob();
           } else if (contentType === 'text/plain') {
             extension = urlExtension || 'txt';
-            data = info?.innerText || '';
+            contentData = info?.innerText || '';
           } else if (urlExtension && ['md', 'txt', 'json', 'xml', 'csv'].includes(urlExtension)) {
             extension = urlExtension;
-            data = info?.innerText || info?.outerHTML || '';
+            contentData = info?.innerText || info?.outerHTML || '';
           }
 
-          return { title: rawTitle, extension, data };
+          return { title: rawTitle, extension, data: contentData };
         } catch (e) {
           console.error(`Failed to capture tab ${t.id}:`, e);
           return { title: `failed-tab-${index}`, extension: 'txt', data: `URL: ${t.url}\nError: ${e}` };
@@ -100,10 +118,11 @@ async function handleExport(scope: ExportScope) {
     const usedNames = new Map<string, number>();
     for (const item of results) {
       let fileName = `${item.title}.${item.extension}`;
-      if (usedNames.has(fileName)) {
-        const count = (usedNames.get(fileName) || 0) + 1;
-        usedNames.set(fileName, count);
-        fileName = `${item.title} (${count}).${item.extension}`;
+      const existingCount = usedNames.get(fileName);
+      if (existingCount !== undefined) {
+        const newCount = existingCount + 1;
+        usedNames.set(fileName, newCount);
+        fileName = `${item.title} (${newCount}).${item.extension}`;
       } else {
         usedNames.set(fileName, 0);
       }
@@ -157,10 +176,14 @@ async function hasOffscreenDocument(): Promise<boolean> {
     return await chrome.offscreen.hasDocument();
   }
   // Fallback: check all clients
-  const contexts = await (chrome.runtime as any).getContexts({
-    contextTypes: ['OFFSCREEN_DOCUMENT']
-  });
-  return contexts.length > 0;
+  const runtime = chrome.runtime as ChromeRuntimeWithContexts;
+  if (typeof runtime.getContexts === 'function') {
+    const contexts = await runtime.getContexts({
+      contextTypes: ['OFFSCREEN_DOCUMENT']
+    });
+    return contexts.length > 0;
+  }
+  return false;
 }
 
 async function createBlobUrlOffscreen(data: ArrayBuffer, mimeType: string): Promise<string> {
