@@ -9,11 +9,12 @@ const BLACKLIST_SCHEMES = ['chrome://', 'file://', 'edge://', 'about:', 'brave:/
 interface TabCaptureResult {
   title: string;
   extension: string;
-  capturedHtmlOrBlob: string | Blob;
+  capturedHtmlContentOrBlob: string | Blob;
 }
 
 // Define extension of chrome.runtime for getContexts using intersection type
 interface ChromeContext {
+  contextId: string;
   contextType: string;
 }
 
@@ -57,7 +58,7 @@ async function captureTabData(tab: { id: number; url: string; title?: string }, 
     const url = new URL(urlString);
     
     // Secure scheme check for fetch
-    if (!['http:', 'https:'].includes(url.protocol)) {
+    if (url.protocol !== 'http:' && url.protocol !== 'https:') {
       throw new Error(`Insecure protocol: ${url.protocol}`);
     }
 
@@ -80,22 +81,25 @@ async function captureTabData(tab: { id: number; url: string; title?: string }, 
     const urlExtension = pathParts.length > 1 ? pathParts.pop()?.toLowerCase() : '';
 
     let extension = 'html';
-    let currentHtmlOrBlob: string | Blob = info?.outerHTML || '';
+    let htmlContentOrBlob: string | Blob = info?.outerHTML || '';
 
     if (contentType === 'application/pdf' || url.pathname.toLowerCase().endsWith('.pdf')) {
       extension = 'pdf';
       const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 10000);
+      const timeoutId = setTimeout(() => {
+        controller.abort();
+      }, 10000);
 
       try {
-        const response = await fetch(urlString, { 
+        const fetchUrl = url.toString();
+        const response = await fetch(fetchUrl, { 
           credentials: 'include',
           signal: controller.signal
         });
         if (!response.ok) {
           throw new Error(`HTTP error! status: ${response.status}`);
         }
-        currentHtmlOrBlob = await response.blob();
+        htmlContentOrBlob = await response.blob();
       } catch (err: unknown) {
         if (err instanceof Error && err.name === 'AbortError') {
           throw new Error('PDF download timed out');
@@ -106,16 +110,16 @@ async function captureTabData(tab: { id: number; url: string; title?: string }, 
       }
     } else if (contentType === 'text/plain') {
       extension = urlExtension || 'txt';
-      currentHtmlOrBlob = info?.innerText || '';
+      htmlContentOrBlob = info?.innerText || '';
     } else if (urlExtension && ['md', 'txt', 'json', 'xml', 'csv'].includes(urlExtension)) {
       extension = urlExtension;
-      currentHtmlOrBlob = info?.innerText || info?.outerHTML || '';
+      htmlContentOrBlob = info?.innerText || info?.outerHTML || '';
     }
 
-    return { title: rawTitle, extension, capturedHtmlOrBlob: currentHtmlOrBlob };
+    return { title: rawTitle, extension, capturedHtmlContentOrBlob: htmlContentOrBlob };
   } catch (e) {
     console.error(`Failed to capture tab ${tab.id}:`, e);
-    return { title: `failed-tab-${index}`, extension: 'txt', capturedHtmlOrBlob: `URL: ${tab.url}\nError: ${e}` };
+    return { title: `failed-tab-${index}`, extension: 'txt', capturedHtmlContentOrBlob: `URL: ${tab.url}\nError: ${e}` };
   }
 }
 
@@ -156,7 +160,7 @@ async function handleExport(scope: ExportScope) {
       } else {
         usedNames.set(fileName, 0);
       }
-      zip.file(fileName, item.capturedHtmlOrBlob);
+      zip.file(fileName, item.capturedHtmlContentOrBlob);
     }
 
     const zipContent = await zip.generateAsync({ type: 'uint8array' });
@@ -187,27 +191,29 @@ async function downloadFile(data: ArrayBuffer, mimeType: string, filename: strin
     });
 
     if (isBlobDownload) {
-      const cleanup = () => {
+      const cleanupRevocation = () => {
         chrome.downloads.onChanged.removeListener(onDownloadChanged);
         chrome.runtime.sendMessage({ type: 'revoke-blob-url', url: downloadUrl }).catch(() => {
-          // Ignore errors if offscreen is already closed
+          // Ignore errors
         });
-        clearTimeout(fallbackTimeout);
+        clearTimeout(fallbackTimeoutId);
       };
 
       const onDownloadChanged = (delta: chrome.downloads.DownloadDelta) => {
         if (delta.id === downloadId && delta.state) {
           const state = delta.state.current;
           if (state === 'complete' || state === 'interrupted') {
-            cleanup();
+            cleanupRevocation();
           }
         }
       };
 
       chrome.downloads.onChanged.addListener(onDownloadChanged);
 
-      // Safe fallback (5 minutes) to ensure revocation even if events are missed
-      const fallbackTimeout = setTimeout(cleanup, 300000);
+      // Safe fallback (5 minutes)
+      const fallbackTimeoutId = setTimeout(() => {
+        cleanupRevocation();
+      }, 300000);
     }
   } catch (err) {
     console.error('Download failed:', err);
@@ -215,12 +221,12 @@ async function downloadFile(data: ArrayBuffer, mimeType: string, filename: strin
 }
 
 async function hasOffscreenDocument(): Promise<boolean> {
-  // @ts-ignore: chrome.offscreen.hasDocument is available in newer versions
+  // @ts-ignore
   if (typeof chrome.offscreen.hasDocument === 'function') {
     // @ts-ignore
     return await chrome.offscreen.hasDocument();
   }
-  // Fallback: check all clients
+  // Fallback
   const runtime = chrome.runtime as unknown as ChromeRuntimeWithContexts;
   if (typeof runtime.getContexts === 'function') {
     const contexts = await runtime.getContexts({
@@ -240,13 +246,13 @@ async function createBlobUrlOffscreen(data: ArrayBuffer, mimeType: string): Prom
     });
   }
 
-  const resultUrl = await chrome.runtime.sendMessage({
+  const resultUrl = (await chrome.runtime.sendMessage({
     type: 'create-blob-url',
     data: data,
     mimeType: mimeType,
-  });
+  })) as string;
 
-  return resultUrl as string;
+  return resultUrl;
 }
 
 function arrayBufferToBase64(buffer: ArrayBuffer): string {

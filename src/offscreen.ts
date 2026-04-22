@@ -34,5 +34,6 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     URL.revokeObjectURL(message.url);
     sendResponse(true);
   }
+
   return true;
 });
