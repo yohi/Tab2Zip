@@ -1,0 +1,64 @@
+name: release-please
+
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  release-please:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: googleapis/release-please-action@v4
+        id: release
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          config-file: .github/release-please-config.json
+          manifest-file: .github/.release-please-manifest.json
+
+      - uses: actions/checkout@v4
+        if: ${{ steps.release.outputs.release_created }}
+
+      - name: Setup Node.js
+        if: ${{ steps.release.outputs.release_created }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+
+      - name: Install dependencies
+        if: ${{ steps.release.outputs.release_created }}
+        run: npm ci
+
+      - name: Build extension
+        if: ${{ steps.release.outputs.release_created }}
+        run: npm run build
+
+      - name: Create ZIP for Chrome Extension
+        if: ${{ steps.release.outputs.release_created }}
+        run: |
+          # 拡張機能のパッケージに含めるファイルを集約する一時ディレクトリを作成
+          mkdir -p release-package
+          
+          # 必要なファイルをコピー
+          cp manifest.json offscreen.html release-package/
+          cp -r dist release-package/
+          
+          # icons ディレクトリが存在し、かつ空でない場合にコピー
+          if [ -d icons ] && [ "$(ls -A icons)" ]; then
+            cp -r icons release-package/
+          fi
+          
+          # ZIP 圧縮を実行 (一時ディレクトリ内で実行してルートにファイルを配置)
+          cd release-package && zip -r ../tab-exporter-extension.zip . -x "*.DS_Store"
+
+      - name: Upload Release Asset
+        if: ${{ steps.release.outputs.release_created }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release upload ${{ steps.release.outputs.tag_name }} tab-exporter-extension.zip
