@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Tab Exporter",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Export tabs to TXT, MD, and PDF with masking",
   "permissions": [
     "contextMenus",
