@@ -9,7 +9,7 @@ const BLACKLIST_SCHEMES = ['chrome://', 'file://', 'edge://', 'about:', 'brave:/
 interface TabCaptureResult {
   title: string;
   extension: string;
-  capturedData: string | Blob;
+  capturedHtmlOrBlob: string | Blob;
 }
 
 // Define extension of chrome.runtime for getContexts
@@ -80,7 +80,7 @@ async function captureTabData(tab: { id: number; url: string; title?: string }, 
     const urlExtension = pathParts.length > 1 ? pathParts.pop()?.toLowerCase() : '';
 
     let extension = 'html';
-    let capturedHtmlOrBlob: string | Blob = info?.outerHTML || '';
+    let currentHtmlOrBlob: string | Blob = info?.outerHTML || '';
 
     if (contentType === 'application/pdf' || url.pathname.toLowerCase().endsWith('.pdf')) {
       extension = 'pdf';
@@ -95,7 +95,7 @@ async function captureTabData(tab: { id: number; url: string; title?: string }, 
         if (!response.ok) {
           throw new Error(`HTTP error! status: ${response.status}`);
         }
-        capturedHtmlOrBlob = await response.blob();
+        currentHtmlOrBlob = await response.blob();
       } catch (err: unknown) {
         if (err instanceof Error && err.name === 'AbortError') {
           throw new Error('PDF download timed out');
@@ -106,16 +106,16 @@ async function captureTabData(tab: { id: number; url: string; title?: string }, 
       }
     } else if (contentType === 'text/plain') {
       extension = urlExtension || 'txt';
-      capturedHtmlOrBlob = info?.innerText || '';
+      currentHtmlOrBlob = info?.innerText || '';
     } else if (urlExtension && ['md', 'txt', 'json', 'xml', 'csv'].includes(urlExtension)) {
       extension = urlExtension;
-      capturedHtmlOrBlob = info?.innerText || info?.outerHTML || '';
+      currentHtmlOrBlob = info?.innerText || info?.outerHTML || '';
     }
 
-    return { title: rawTitle, extension, capturedData: capturedHtmlOrBlob };
+    return { title: rawTitle, extension, capturedHtmlOrBlob: currentHtmlOrBlob };
   } catch (e) {
     console.error(`Failed to capture tab ${tab.id}:`, e);
-    return { title: `failed-tab-${index}`, extension: 'txt', capturedData: `URL: ${tab.url}\nError: ${e}` };
+    return { title: `failed-tab-${index}`, extension: 'txt', capturedHtmlOrBlob: `URL: ${tab.url}\nError: ${e}` };
   }
 }
 
@@ -156,7 +156,7 @@ async function handleExport(scope: ExportScope) {
       } else {
         usedNames.set(fileName, 0);
       }
-      zip.file(fileName, item.capturedData);
+      zip.file(fileName, item.capturedHtmlOrBlob);
     }
 
     const zipContent = await zip.generateAsync({ type: 'uint8array' });
@@ -170,13 +170,13 @@ async function handleExport(scope: ExportScope) {
 async function downloadFile(data: ArrayBuffer, mimeType: string, filename: string) {
   let downloadUrl: string;
   const size = data.byteLength;
-  let isBlob = false;
+  let isBlobDownload = false;
 
   if (size < LARGE_FILE_THRESHOLD) {
     downloadUrl = `data:${mimeType};base64,${arrayBufferToBase64(data)}`;
   } else {
     downloadUrl = await createBlobUrlOffscreen(data, mimeType);
-    isBlob = true;
+    isBlobDownload = true;
   }
 
   try {
@@ -186,7 +186,7 @@ async function downloadFile(data: ArrayBuffer, mimeType: string, filename: strin
       saveAs: true,
     });
 
-    if (isBlob) {
+    if (isBlobDownload) {
       // Small timeout to ensure browser has started the download process
       setTimeout(() => {
         chrome.runtime.sendMessage({ type: 'revoke-blob-url', url: downloadUrl }).catch(e => {
@@ -225,13 +225,13 @@ async function createBlobUrlOffscreen(data: ArrayBuffer, mimeType: string): Prom
     });
   }
 
-  const blobUrl = await chrome.runtime.sendMessage({
+  const resultUrl = await chrome.runtime.sendMessage({
     type: 'create-blob-url',
     data: data,
     mimeType: mimeType,
-  }) as string;
+  });
 
-  return blobUrl;
+  return resultUrl as string;
 }
 
 function arrayBufferToBase64(buffer: ArrayBuffer): string {
