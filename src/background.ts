@@ -9,7 +9,7 @@ const BLACKLIST_SCHEMES = ['chrome://', 'file://', 'edge://', 'about:', 'brave:/
 interface TabCaptureResult {
   title: string;
   extension: string;
-  data: string | Blob;
+  capturedData: string | Blob;
 }
 
 // Define extension of chrome.runtime for getContexts
@@ -80,7 +80,7 @@ async function captureTabData(tab: { id: number; url: string; title?: string }, 
     const urlExtension = pathParts.length > 1 ? pathParts.pop()?.toLowerCase() : '';
 
     let extension = 'html';
-    let contentData: string | Blob = info?.outerHTML || '';
+    let capturedHtmlOrBlob: string | Blob = info?.outerHTML || '';
 
     if (contentType === 'application/pdf' || url.pathname.toLowerCase().endsWith('.pdf')) {
       extension = 'pdf';
@@ -95,7 +95,7 @@ async function captureTabData(tab: { id: number; url: string; title?: string }, 
         if (!response.ok) {
           throw new Error(`HTTP error! status: ${response.status}`);
         }
-        contentData = await response.blob();
+        capturedHtmlOrBlob = await response.blob();
       } catch (err: unknown) {
         if (err instanceof Error && err.name === 'AbortError') {
           throw new Error('PDF download timed out');
@@ -106,16 +106,16 @@ async function captureTabData(tab: { id: number; url: string; title?: string }, 
       }
     } else if (contentType === 'text/plain') {
       extension = urlExtension || 'txt';
-      contentData = info?.innerText || '';
+      capturedHtmlOrBlob = info?.innerText || '';
     } else if (urlExtension && ['md', 'txt', 'json', 'xml', 'csv'].includes(urlExtension)) {
       extension = urlExtension;
-      contentData = info?.innerText || info?.outerHTML || '';
+      capturedHtmlOrBlob = info?.innerText || info?.outerHTML || '';
     }
 
-    return { title: rawTitle, extension, data: contentData };
+    return { title: rawTitle, extension, capturedData: capturedHtmlOrBlob };
   } catch (e) {
     console.error(`Failed to capture tab ${tab.id}:`, e);
-    return { title: `failed-tab-${index}`, extension: 'txt', data: `URL: ${tab.url}\nError: ${e}` };
+    return { title: `failed-tab-${index}`, extension: 'txt', capturedData: `URL: ${tab.url}\nError: ${e}` };
   }
 }
 
@@ -156,7 +156,7 @@ async function handleExport(scope: ExportScope) {
       } else {
         usedNames.set(fileName, 0);
       }
-      zip.file(fileName, item.data);
+      zip.file(fileName, item.capturedData);
     }
 
     const zipContent = await zip.generateAsync({ type: 'uint8array' });
@@ -168,20 +168,20 @@ async function handleExport(scope: ExportScope) {
 }
 
 async function downloadFile(data: ArrayBuffer, mimeType: string, filename: string) {
-  let url: string;
+  let downloadUrl: string;
   const size = data.byteLength;
   let isBlob = false;
 
   if (size < LARGE_FILE_THRESHOLD) {
-    url = `data:${mimeType};base64,${arrayBufferToBase64(data)}`;
+    downloadUrl = `data:${mimeType};base64,${arrayBufferToBase64(data)}`;
   } else {
-    url = await createBlobUrlOffscreen(data, mimeType);
+    downloadUrl = await createBlobUrlOffscreen(data, mimeType);
     isBlob = true;
   }
 
   try {
     await chrome.downloads.download({
-      url: url,
+      url: downloadUrl,
       filename: filename,
       saveAs: true,
     });
@@ -189,7 +189,7 @@ async function downloadFile(data: ArrayBuffer, mimeType: string, filename: strin
     if (isBlob) {
       // Small timeout to ensure browser has started the download process
       setTimeout(() => {
-        chrome.runtime.sendMessage({ type: 'revoke-blob-url', url: url }).catch(e => {
+        chrome.runtime.sendMessage({ type: 'revoke-blob-url', url: downloadUrl }).catch(e => {
           console.error('Failed to send revoke message:', e);
         });
       }, 10000);
@@ -206,7 +206,7 @@ async function hasOffscreenDocument(): Promise<boolean> {
     return await chrome.offscreen.hasDocument();
   }
   // Fallback: check all clients
-  const runtime = chrome.runtime as ChromeRuntimeWithContexts;
+  const runtime = chrome.runtime as unknown as ChromeRuntimeWithContexts;
   if (typeof runtime.getContexts === 'function') {
     const contexts = await runtime.getContexts({
       contextTypes: ['OFFSCREEN_DOCUMENT']
@@ -225,13 +225,13 @@ async function createBlobUrlOffscreen(data: ArrayBuffer, mimeType: string): Prom
     });
   }
 
-  const url = await chrome.runtime.sendMessage({
+  const blobUrl = await chrome.runtime.sendMessage({
     type: 'create-blob-url',
     data: data,
     mimeType: mimeType,
-  });
+  }) as string;
 
-  return url;
+  return blobUrl;
 }
 
 function arrayBufferToBase64(buffer: ArrayBuffer): string {
