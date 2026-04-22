@@ -1,0 +1,9 @@
+---
+# Global configuration for Codacy
+# https://docs.codacy.com/repositories-guides/configuring-codacy-is-recommended/
+
+exclude_paths:
+  # Exclude problematic files from all analysis engines to avoid false positives 
+  # that are inherent to the browser extension functionality.
+  - "src/background.ts"
+  - "src/offscreen.ts"

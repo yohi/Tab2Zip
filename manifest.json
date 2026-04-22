@@ -1,0 +1,21 @@
+{
+  "manifest_version": 3,
+  "name": "Tab Exporter",
+  "version": "1.0.0",
+  "description": "Export tabs to TXT, MD, and PDF with masking",
+  "permissions": [
+    "contextMenus",
+    "tabs",
+    "downloads",
+    "offscreen",
+    "scripting"
+  ],
+  "host_permissions": [
+    "<all_urls>"
+  ],
+  "background": {
+    "service_worker": "dist/background.js",
+    "type": "module"
+  },
+  "minimum_chrome_version": "109"
+}

@@ -1,0 +1,27 @@
+{
+  "name": "tab-exporter-extension",
+  "version": "1.0.0",
+  "description": "Chrome Extension to export tabs to TXT, MD, and PDF",
+  "type": "module",
+  "scripts": {
+    "build": "esbuild src/background.ts src/offscreen.ts --bundle --outdir=dist --format=esm",
+    "watch": "esbuild src/background.ts src/offscreen.ts --bundle --outdir=dist --format=esm --watch",
+    "lint": "eslint .",
+    "format": "prettier --write \"src/**/*.ts\"",
+    "test": "npm run lint && npm run build"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.26.0",
+    "@types/chrome": "^0.0.280",
+    "@types/jszip": "^3.4.1",
+    "esbuild": "^0.25.0",
+    "eslint": "^9.26.0",
+    "globals": "^15.9.0",
+    "prettier": "^3.2.5",
+    "typescript": "^5.3.3",
+    "typescript-eslint": "^8.2.0"
+  },
+  "dependencies": {
+    "jszip": "^3.10.1"
+  }
+}
