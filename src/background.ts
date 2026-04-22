@@ -96,8 +96,26 @@ async function handleExport(scope: ExportScope) {
 
           if (contentType === 'application/pdf' || url.pathname.toLowerCase().endsWith('.pdf')) {
             extension = 'pdf';
-            const response = await fetch(urlString, { credentials: 'include' });
-            contentData = await response.blob();
+            const controller = new AbortController();
+            const timeoutId = setTimeout(() => controller.abort(), 10000);
+
+            try {
+              const response = await fetch(urlString, { 
+                credentials: 'include',
+                signal: controller.signal
+              });
+              if (!response.ok) {
+                throw new Error(`HTTP error! status: ${response.status}`);
+              }
+              contentData = await response.blob();
+            } catch (err: any) {
+              if (err.name === 'AbortError') {
+                throw new Error('PDF download timed out');
+              }
+              throw err;
+            } finally {
+              clearTimeout(timeoutId);
+            }
           } else if (contentType === 'text/plain') {
             extension = urlExtension || 'txt';
             contentData = info?.innerText || '';
