@@ -12,14 +12,14 @@ interface TabCaptureResult {
   capturedHtmlOrBlob: string | Blob;
 }
 
-// Define extension of chrome.runtime for getContexts
+// Define extension of chrome.runtime for getContexts using intersection type
 interface ChromeContext {
   contextType: string;
 }
 
-interface ChromeRuntimeWithContexts extends typeof chrome.runtime {
+type ChromeRuntimeWithContexts = typeof chrome.runtime & {
   getContexts: (filter: { contextTypes: string[] }) => Promise<ChromeContext[]>;
-}
+};
 
 // --- Initialization ---
 chrome.runtime.onInstalled.addListener(() => {
@@ -180,19 +180,34 @@ async function downloadFile(data: ArrayBuffer, mimeType: string, filename: strin
   }
 
   try {
-    await chrome.downloads.download({
+    const downloadId = await chrome.downloads.download({
       url: downloadUrl,
       filename: filename,
       saveAs: true,
     });
 
     if (isBlobDownload) {
-      // Small timeout to ensure browser has started the download process
-      setTimeout(() => {
-        chrome.runtime.sendMessage({ type: 'revoke-blob-url', url: downloadUrl }).catch(e => {
-          console.error('Failed to send revoke message:', e);
+      const cleanup = () => {
+        chrome.downloads.onChanged.removeListener(onDownloadChanged);
+        chrome.runtime.sendMessage({ type: 'revoke-blob-url', url: downloadUrl }).catch(() => {
+          // Ignore errors if offscreen is already closed
         });
-      }, 10000);
+        clearTimeout(fallbackTimeout);
+      };
+
+      const onDownloadChanged = (delta: chrome.downloads.DownloadDelta) => {
+        if (delta.id === downloadId && delta.state) {
+          const state = delta.state.current;
+          if (state === 'complete' || state === 'interrupted') {
+            cleanup();
+          }
+        }
+      };
+
+      chrome.downloads.onChanged.addListener(onDownloadChanged);
+
+      // Safe fallback (5 minutes) to ensure revocation even if events are missed
+      const fallbackTimeout = setTimeout(cleanup, 300000);
     }
   } catch (err) {
     console.error('Download failed:', err);
