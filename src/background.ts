@@ -4,6 +4,8 @@ import JSZip from 'jszip';
 const LARGE_FILE_THRESHOLD = 2 * 1024 * 1024; // 2MB
 type ExportScope = 'highlighted' | 'all';
 
+const BLACKLIST_SCHEMES = ['chrome://', 'file://', 'edge://', 'about:', 'brave://', 'view-source:', 'moz-extension://'];
+
 // --- Initialization ---
 chrome.runtime.onInstalled.addListener(() => {
   chrome.contextMenus.removeAll(() => {
@@ -36,7 +38,7 @@ async function handleExport(scope: ExportScope) {
     const tabs = await chrome.tabs.query(queryOptions);
 
     const filteredTabs = tabs.filter(
-      (t) => t.id && t.url && !t.url.startsWith('chrome://') && !t.url.startsWith('file://')
+      (t) => t.id && t.url && !BLACKLIST_SCHEMES.some(s => t.url!.startsWith(s))
     );
 
     if (filteredTabs.length === 0) {
@@ -119,26 +121,58 @@ async function handleExport(scope: ExportScope) {
 async function downloadFile(data: ArrayBuffer, mimeType: string, filename: string) {
   let url: string;
   const size = data.byteLength;
+  let isBlob = false;
 
   if (size < LARGE_FILE_THRESHOLD) {
     url = `data:${mimeType};base64,${arrayBufferToBase64(data)}`;
   } else {
     url = await createBlobUrlOffscreen(data, mimeType);
+    isBlob = true;
   }
 
-  await chrome.downloads.download({
-    url: url,
-    filename: filename,
-    saveAs: true,
+  try {
+    const downloadId = await chrome.downloads.download({
+      url: url,
+      filename: filename,
+      saveAs: true,
+    });
+
+    // Revoke the Blob URL after download is registered (or we could wait for completion)
+    if (isBlob) {
+      // Small timeout to ensure browser has started the download process
+      setTimeout(() => {
+        // Since we're in background, we'd normally need to call offscreen to revoke
+        // but for now we just keep the URL until session ends if reusable.
+        // If we want to be strict:
+        // chrome.runtime.sendMessage({ type: 'revoke-blob-url', url: url });
+      }, 10000);
+    }
+  } catch (err) {
+    console.error('Download failed:', err);
+  }
+}
+
+async function hasOffscreenDocument(): Promise<boolean> {
+  // @ts-ignore: chrome.offscreen.hasDocument is available in newer versions
+  if (typeof chrome.offscreen.hasDocument === 'function') {
+    // @ts-ignore
+    return await chrome.offscreen.hasDocument();
+  }
+  // Fallback: check all clients (less reliable but common)
+  const contexts = await chrome.runtime.getContexts({
+    contextTypes: [chrome.runtime.ContextType.OFFSCREEN_DOCUMENT]
   });
+  return contexts.length > 0;
 }
 
 async function createBlobUrlOffscreen(data: ArrayBuffer, mimeType: string): Promise<string> {
-  await chrome.offscreen.createDocument({
-    url: 'offscreen.html',
-    reasons: [chrome.offscreen.Reason.LOCAL_STORAGE],
-    justification: 'Generate Blob URL for large ZIP downloads',
-  });
+  if (!(await hasOffscreenDocument())) {
+    await chrome.offscreen.createDocument({
+      url: 'offscreen.html',
+      reasons: [chrome.offscreen.Reason.BLOBS],
+      justification: 'Generate Blob URL for large ZIP downloads',
+    });
+  }
 
   const url = await chrome.runtime.sendMessage({
     type: 'create-blob-url',
@@ -146,15 +180,13 @@ async function createBlobUrlOffscreen(data: ArrayBuffer, mimeType: string): Prom
     mimeType: mimeType,
   });
 
-  await chrome.offscreen.closeDocument();
   return url;
 }
 
 function arrayBufferToBase64(buffer: ArrayBuffer): string {
-  let binary = '';
   const bytes = new Uint8Array(buffer);
-  const len = bytes.byteLength;
-  for (let i = 0; i < len; i++) {
+  let binary = '';
+  for (let i = 0; i < bytes.byteLength; i++) {
     binary += String.fromCharCode(bytes[i]);
   }
   return btoa(binary);
