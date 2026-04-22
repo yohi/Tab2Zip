@@ -51,6 +51,8 @@ chrome.contextMenus.onClicked.addListener(async (info) => {
   }
 });
 
+let offscreenCreationPromise: Promise<void> | null = null;
+
 /**
  * Validates the URL to mitigate SSRF risks.
  */
@@ -59,10 +61,36 @@ function isValidFetchUrl(url: URL): boolean {
   if (url.protocol !== 'http:' && url.protocol !== 'https:') {
     return false;
   }
-  // Block common local/private hostnames as a basic safety measure
+
   const hostname = url.hostname.toLowerCase();
-  const blockedHosts = ['localhost', '127.0.0.1', '::1', '0.0.0.0'];
-  return !blockedHosts.includes(hostname);
+
+  // Block common local/private hostnames
+  const blockedHosts = ['localhost'];
+  if (blockedHosts.includes(hostname)) return false;
+
+  // Simple IP check for RFC1918, link-local, loopback, etc.
+  // Note: True DNS resolution isn't available via standard extension APIs,
+  // but we can block literal IP addresses in restricted ranges.
+  const ipRegex = /^(\d{1,3}\.){3}\d{1,3}$|^\[([a-fA-F0-9:]+)\]$/;
+  if (ipRegex.test(hostname)) {
+    // IPv4 check
+    if (!hostname.includes(':')) {
+      const parts = hostname.split('.').map(Number);
+      if (parts[0] === 10) return false; // 10.0.0.0/8
+      if (parts[0] === 172 && parts[1] >= 16 && parts[1] <= 31) return false; // 172.16.0.0/12
+      if (parts[0] === 192 && parts[1] === 168) return false; // 192.168.0.0/16
+      if (parts[0] === 127) return false; // 127.0.0.0/8
+      if (parts[0] === 169 && parts[1] === 254) return false; // 169.254.0.0/16
+      if (parts[0] === 0) return false; // 0.0.0.0/8
+      if (parts[0] >= 224) return false; // Multicast/Reserved
+    } else {
+      // IPv6 check (basic)
+      const v6 = hostname.replace(/[\[\]]/g, '').toLowerCase();
+      if (v6 === '::1' || v6 === '::' || v6.startsWith('fe80:') || v6.startsWith('fc') || v6.startsWith('fd')) return false;
+    }
+  }
+
+  return true;
 }
 
 async function captureTabData(tab: { id: number; url: string; title?: string }, index: number): Promise<TabCaptureResult> {
@@ -79,7 +107,7 @@ async function captureTabData(tab: { id: number; url: string; title?: string }, 
       func: () => ({
         contentType: document.contentType,
         outerHTML: document.documentElement.outerHTML,
-        innerText: document.body.innerText,
+        innerText: document.body?.innerText ?? document.documentElement?.innerText ?? document.body?.textContent ?? '',
       }),
     });
     
@@ -98,7 +126,8 @@ async function captureTabData(tab: { id: number; url: string; title?: string }, 
 
       try {
         const response = await fetch(url.toString(), { 
-          credentials: 'include',
+          credentials: 'omit',
+          redirect: 'error',
           signal: controller.signal
         });
         if (!response.ok) throw new Error(`HTTP ${response.status}`);
@@ -166,18 +195,18 @@ async function handleExport(scope: ExportScope) {
   }
 }
 
-async function downloadFile(data: ArrayBuffer, mime: string, name: string) {
-  let url: string;
+async function downloadFile(data: ArrayBufferLike, mime: string, name: string) {
+  let url: string = '';
   let isBlob = false;
 
-  if (data.byteLength < LARGE_FILE_THRESHOLD) {
-    url = `data:${mime};base64,${arrayBufferToBase64(data)}`;
-  } else {
-    url = await createBlobUrlOffscreen(data, mime);
-    isBlob = true;
-  }
-
   try {
+    if (data.byteLength < LARGE_FILE_THRESHOLD) {
+      url = `data:${mime};base64,${arrayBufferToBase64(data)}`;
+    } else {
+      url = await createBlobUrlOffscreen(data, mime);
+      isBlob = true;
+    }
+
     const dId = await chrome.downloads.download({ url, filename: name, saveAs: true });
     if (isBlob) {
       const cleanup = () => {
@@ -193,6 +222,9 @@ async function downloadFile(data: ArrayBuffer, mime: string, name: string) {
     }
   } catch (err) {
     console.error('Download error:', err);
+    if (isBlob && url) {
+      chrome.runtime.sendMessage({ type: 'revoke-blob-url', url }).catch(() => {});
+    }
   }
 }
 
@@ -207,19 +239,33 @@ async function hasOffscreenDocument(): Promise<boolean> {
   return false;
 }
 
-async function createBlobUrlOffscreen(data: ArrayBuffer, mime: string): Promise<string> {
+async function createBlobUrlOffscreen(data: ArrayBufferLike, mime: string): Promise<string> {
   if (!(await hasOffscreenDocument())) {
-    await chrome.offscreen.createDocument({
-      url: 'offscreen.html',
-      reasons: [chrome.offscreen.Reason.BLOBS],
-      justification: 'Large ZIP download',
-    });
+    if (!offscreenCreationPromise) {
+      offscreenCreationPromise = (async () => {
+        try {
+          await chrome.offscreen.createDocument({
+            url: 'offscreen.html',
+            reasons: [chrome.offscreen.Reason.BLOBS],
+            justification: 'Large ZIP download',
+          });
+        } catch (e: any) {
+          if (!e.message?.includes('Only a single offscreen document may be created')) {
+            throw e;
+          }
+        } finally {
+          offscreenCreationPromise = null;
+        }
+      })();
+    }
+    await offscreenCreationPromise;
   }
   return (await chrome.runtime.sendMessage({ type: 'create-blob-url', data, mimeType: mime })) as string;
 }
 
-function arrayBufferToBase64(buffer: ArrayBuffer): string {
+function arrayBufferToBase64(buffer: ArrayBufferLike): string {
   const bytes = new Uint8Array(buffer);
+
   const CHUNK = 0x8000;
   const chunks: string[] = [];
   for (let i = 0; i < bytes.length; i += CHUNK) {
