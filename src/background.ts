@@ -24,11 +24,11 @@ chrome.runtime.onInstalled.addListener(() => {
 });
 
 // --- Event Handling ---
-chrome.contextMenus.onClicked.addListener((info) => {
+chrome.contextMenus.onClicked.addListener(async (info) => {
   if (info.menuItemId === 'export-zip-highlighted') {
-    handleExport('highlighted');
+    await handleExport('highlighted');
   } else if (info.menuItemId === 'export-zip-all') {
-    handleExport('all');
+    await handleExport('all');
   }
 });
 
@@ -38,7 +38,7 @@ async function handleExport(scope: ExportScope) {
     const tabs = await chrome.tabs.query(queryOptions);
 
     const filteredTabs = tabs.filter(
-      (t) => t.id && t.url && !BLACKLIST_SCHEMES.some(s => t.url!.startsWith(s))
+      (t) => t.id !== undefined && t.url !== undefined && !BLACKLIST_SCHEMES.some(s => t.url?.startsWith(s))
     );
 
     if (filteredTabs.length === 0) {
@@ -53,13 +53,13 @@ async function handleExport(scope: ExportScope) {
     const results = await Promise.all(
       filteredTabs.map(async (t, index) => {
         try {
-          const urlString = t.url!;
+          const urlString = t.url || '';
           const url = new URL(urlString);
           const rawTitle = (t.title || `tab-${index}`).replace(/[\/\\?%*:|"<>]/g, '_');
 
           // 1. Get info from the tab
           const scriptingResults = await chrome.scripting.executeScript({
-            target: { tabId: t.id! },
+            target: { tabId: t.id! }, // id is checked in filter
             func: () => ({
               contentType: document.contentType,
               outerHTML: document.documentElement.outerHTML,
@@ -78,7 +78,7 @@ async function handleExport(scope: ExportScope) {
 
           if (contentType === 'application/pdf' || url.pathname.toLowerCase().endsWith('.pdf')) {
             extension = 'pdf';
-            const response = await fetch(urlString);
+            const response = await fetch(urlString, { credentials: 'include' });
             data = await response.blob();
           } else if (contentType === 'text/plain') {
             extension = urlExtension || 'txt';
@@ -101,7 +101,7 @@ async function handleExport(scope: ExportScope) {
     for (const item of results) {
       let fileName = `${item.title}.${item.extension}`;
       if (usedNames.has(fileName)) {
-        const count = usedNames.get(fileName)! + 1;
+        const count = (usedNames.get(fileName) || 0) + 1;
         usedNames.set(fileName, count);
         fileName = `${item.title} (${count}).${item.extension}`;
       } else {
@@ -131,20 +131,18 @@ async function downloadFile(data: ArrayBuffer, mimeType: string, filename: strin
   }
 
   try {
-    const downloadId = await chrome.downloads.download({
+    await chrome.downloads.download({
       url: url,
       filename: filename,
       saveAs: true,
     });
 
-    // Revoke the Blob URL after download is registered (or we could wait for completion)
     if (isBlob) {
       // Small timeout to ensure browser has started the download process
       setTimeout(() => {
-        // Since we're in background, we'd normally need to call offscreen to revoke
-        // but for now we just keep the URL until session ends if reusable.
-        // If we want to be strict:
-        // chrome.runtime.sendMessage({ type: 'revoke-blob-url', url: url });
+        chrome.runtime.sendMessage({ type: 'revoke-blob-url', url: url }).catch(e => {
+          console.error('Failed to send revoke message:', e);
+        });
       }, 10000);
     }
   } catch (err) {
@@ -158,9 +156,9 @@ async function hasOffscreenDocument(): Promise<boolean> {
     // @ts-ignore
     return await chrome.offscreen.hasDocument();
   }
-  // Fallback: check all clients (less reliable but common)
-  const contexts = await chrome.runtime.getContexts({
-    contextTypes: [chrome.runtime.ContextType.OFFSCREEN_DOCUMENT]
+  // Fallback: check all clients
+  const contexts = await (chrome.runtime as any).getContexts({
+    contextTypes: ['OFFSCREEN_DOCUMENT']
   });
   return contexts.length > 0;
 }
@@ -185,9 +183,12 @@ async function createBlobUrlOffscreen(data: ArrayBuffer, mimeType: string): Prom
 
 function arrayBufferToBase64(buffer: ArrayBuffer): string {
   const bytes = new Uint8Array(buffer);
-  let binary = '';
-  for (let i = 0; i < bytes.byteLength; i++) {
-    binary += String.fromCharCode(bytes[i]);
+  const CHUNK_SIZE = 0x8000; // 32KB
+  const chunks: string[] = [];
+  
+  for (let i = 0; i < bytes.length; i += CHUNK_SIZE) {
+    chunks.push(String.fromCharCode.apply(null, Array.from(bytes.subarray(i, i + CHUNK_SIZE))));
   }
-  return btoa(binary);
+  
+  return btoa(chunks.join(''));
 }
