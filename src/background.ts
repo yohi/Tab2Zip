@@ -6,9 +6,19 @@ type ExportScope = 'highlighted' | 'all';
 
 const BLACKLIST_SCHEMES = ['chrome://', 'file://', 'edge://', 'about:', 'brave://', 'view-source:', 'moz-extension://'];
 
+interface TabCaptureResult {
+  title: string;
+  extension: string;
+  data: string | Blob;
+}
+
 // Define extension of chrome.runtime for getContexts
+interface ChromeContext {
+  contextType: string;
+}
+
 interface ChromeRuntimeWithContexts extends typeof chrome.runtime {
-  getContexts: (filter: { contextTypes: string[] }) => Promise<any[]>;
+  getContexts: (filter: { contextTypes: string[] }) => Promise<ChromeContext[]>;
 }
 
 // --- Initialization ---
@@ -41,6 +51,74 @@ chrome.contextMenus.onClicked.addListener(async (info) => {
   }
 });
 
+async function captureTabData(tab: { id: number; url: string; title?: string }, index: number): Promise<TabCaptureResult> {
+  try {
+    const urlString = tab.url;
+    const url = new URL(urlString);
+    
+    // Secure scheme check for fetch
+    if (!['http:', 'https:'].includes(url.protocol)) {
+      throw new Error(`Insecure protocol: ${url.protocol}`);
+    }
+
+    const rawTitle = (tab.title || `tab-${index}`).replace(/[\/\\?%*:|"<>]/g, '_');
+
+    // 1. Get info from the tab
+    const scriptingResults = await chrome.scripting.executeScript({
+      target: { tabId: tab.id },
+      func: () => ({
+        contentType: document.contentType,
+        outerHTML: document.documentElement.outerHTML,
+        innerText: document.body.innerText,
+      }),
+    });
+    const info = scriptingResults[0]?.result;
+    const contentType = info?.contentType || '';
+
+    // 2. Determine extension
+    const pathParts = url.pathname.split('.');
+    const urlExtension = pathParts.length > 1 ? pathParts.pop()?.toLowerCase() : '';
+
+    let extension = 'html';
+    let contentData: string | Blob = info?.outerHTML || '';
+
+    if (contentType === 'application/pdf' || url.pathname.toLowerCase().endsWith('.pdf')) {
+      extension = 'pdf';
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 10000);
+
+      try {
+        const response = await fetch(urlString, { 
+          credentials: 'include',
+          signal: controller.signal
+        });
+        if (!response.ok) {
+          throw new Error(`HTTP error! status: ${response.status}`);
+        }
+        contentData = await response.blob();
+      } catch (err: unknown) {
+        if (err instanceof Error && err.name === 'AbortError') {
+          throw new Error('PDF download timed out');
+        }
+        throw err;
+      } finally {
+        clearTimeout(timeoutId);
+      }
+    } else if (contentType === 'text/plain') {
+      extension = urlExtension || 'txt';
+      contentData = info?.innerText || '';
+    } else if (urlExtension && ['md', 'txt', 'json', 'xml', 'csv'].includes(urlExtension)) {
+      extension = urlExtension;
+      contentData = info?.innerText || info?.outerHTML || '';
+    }
+
+    return { title: rawTitle, extension, data: contentData };
+  } catch (e) {
+    console.error(`Failed to capture tab ${tab.id}:`, e);
+    return { title: `failed-tab-${index}`, extension: 'txt', data: `URL: ${tab.url}\nError: ${e}` };
+  }
+}
+
 async function handleExport(scope: ExportScope) {
   try {
     const queryOptions = scope === 'highlighted' ? { highlighted: true, currentWindow: true } : {};
@@ -63,73 +141,7 @@ async function handleExport(scope: ExportScope) {
 
     // 1. Collect all data first
     const results = await Promise.all(
-      filteredTabs.map(async (t, index) => {
-        try {
-          const urlString = t.url;
-          const url = new URL(urlString);
-          
-          // Secure scheme check for fetch
-          if (!['http:', 'https:'].includes(url.protocol)) {
-            throw new Error(`Insecure protocol: ${url.protocol}`);
-          }
-
-          const rawTitle = (t.title || `tab-${index}`).replace(/[\/\\?%*:|"<>]/g, '_');
-
-          // 1. Get info from the tab
-          const scriptingResults = await chrome.scripting.executeScript({
-            target: { tabId: t.id },
-            func: () => ({
-              contentType: document.contentType,
-              outerHTML: document.documentElement.outerHTML,
-              innerText: document.body.innerText,
-            }),
-          });
-          const info = scriptingResults[0]?.result;
-          const contentType = info?.contentType || '';
-
-          // 2. Determine extension
-          const pathParts = url.pathname.split('.');
-          const urlExtension = pathParts.length > 1 ? pathParts.pop()?.toLowerCase() : '';
-
-          let extension = 'html';
-          let contentData: string | Blob = info?.outerHTML || '';
-
-          if (contentType === 'application/pdf' || url.pathname.toLowerCase().endsWith('.pdf')) {
-            extension = 'pdf';
-            const controller = new AbortController();
-            const timeoutId = setTimeout(() => controller.abort(), 10000);
-
-            try {
-              const response = await fetch(urlString, { 
-                credentials: 'include',
-                signal: controller.signal
-              });
-              if (!response.ok) {
-                throw new Error(`HTTP error! status: ${response.status}`);
-              }
-              contentData = await response.blob();
-            } catch (err: any) {
-              if (err.name === 'AbortError') {
-                throw new Error('PDF download timed out');
-              }
-              throw err;
-            } finally {
-              clearTimeout(timeoutId);
-            }
-          } else if (contentType === 'text/plain') {
-            extension = urlExtension || 'txt';
-            contentData = info?.innerText || '';
-          } else if (urlExtension && ['md', 'txt', 'json', 'xml', 'csv'].includes(urlExtension)) {
-            extension = urlExtension;
-            contentData = info?.innerText || info?.outerHTML || '';
-          }
-
-          return { title: rawTitle, extension, data: contentData };
-        } catch (e) {
-          console.error(`Failed to capture tab ${t.id}:`, e);
-          return { title: `failed-tab-${index}`, extension: 'txt', data: `URL: ${t.url}\nError: ${e}` };
-        }
-      })
+      filteredTabs.map((t, index) => captureTabData(t, index))
     );
 
     // 2. Add to ZIP with uniqueness check
