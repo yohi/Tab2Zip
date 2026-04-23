@@ -20,12 +20,12 @@ The mission is to build a Chrome Manifest V3 extension that archives browser tab
 
 ## 📜 Mandatory Rules
 *These rules are absolute unless a technical blocker is encountered; in such cases, consult the user.*
-*Keywords like **MUST**, **SHOULD**, and **MAY** follow [RFC 2119](https://datatracker.ietf.org/doc/html/rfc2119) definitions.*
+*Compliance terminology (such as required, recommended, and optional actions) follows [RFC 2119](https://datatracker.ietf.org/doc/html/rfc2119) definitions (e.g., **MUST**, **SHOULD**, and **MAY**).*
 
 1. **Security**: Every fetch operation **MUST** be validated via `isValidFetchUrl` in `src/background.ts` to block private/internal **IP (Internet Protocol)** ranges, unless the target is a pre-validated safe-list.
 2. **Privacy**: Sensitive data **MUST** be redacted in URLs and filenames, unless explicit user consent for specific diagnostic logging is provided.
 3. **Architecture**: ZIP generation 2MB or larger (>= 2MB) **MUST** be offloaded to the Offscreen Document to avoid Service Worker termination, unless the target environment supports long-lived workers with specific extensions.
-4. **Code Quality**: Maintain 100% TypeScript type safety. **SPEC (Specification)** compliance is required as defined in the local `./SPEC.md`.
+4. **Code Quality**: Maintain 100% TypeScript type safety. Specification compliance is required as defined in the local file `SPEC.md`.
 
 ## 💡 Examples
 
